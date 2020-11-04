@@ -29,6 +29,14 @@
 #include "msr.h"
 #include "pmc.h"
 
+#define DEBUG 0
+
+#if DEBUG
+	#define dbg_info(...) printf(__VA_ARGS__)
+#else
+	#define dbg_info(...)
+#endif
+
 //for PMU (Performance Monitor Unit counter), port from Kaige's PMU module code
 
 #define PMC_MAX 8
@@ -83,6 +91,8 @@ static int cpu_index = -1;
 static inline uint64_t _x86_pmc_read(unsigned int idx)
 {
     uint32_t lo, hi;
+
+	dbg_info("read-pmc: %d\n", idx);
 
     __asm__ volatile("rdpmc" : "=a" (lo), "=d" (hi) : "c" (idx));
 
@@ -169,6 +179,8 @@ static void stop_gp_perf_counter(int counter_idx, uint64_t *ret)
 
 void pmc_start(int cpu)
 {
+	dbg_info("pmc-start: %d\n", cpu);
+
     cpu_index = cpu;
 
 	/* for cpu retired instructions */
@@ -199,6 +211,8 @@ void pmc_start(int cpu)
 
 void pmc_stop(int cpu)
 {
+	dbg_info("pmc-stop: %d\n", cpu);
+
     cpu_index = cpu;
 
 	/* disable all counter */
@@ -238,13 +252,20 @@ void pmc_report(void)
 	printf("branches_miss  = 0x%lx\n", branch_misses);
 }
 
+#define RDPMC_PATH "/sys/devices/cpu/rdpmc"
+
 bool pmc_init(int cpu)
 {
     cpu_index = cpu;
 
     //emable rdpmc in userland
+	int ret = system("echo 2 > " RDPMC_PATH);
 
-
+	dbg_info("pmc_init system ret=%d\n", ret);
+	if (ret != 0) {
+		fprintf(stderr, RDPMC_PATH "set failed, please check!\n");
+		return false;
+	}
     //use cpuid to check its version: >=4
 
 	return true;

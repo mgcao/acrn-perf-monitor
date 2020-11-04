@@ -55,8 +55,10 @@ int main(int argc, const char *argv[])
 
 	printf("loops: %d\n", count);
 
-//	pmc_init(0);
-//	pmc_init(1);
+	if (!pmc_init(0)) {
+		perror("PMU can't count!\n");
+		return -1;
+	}
 
 	bool has_dram_info = dram_mon_init();
 	bool has_vmexit = acrn_vmexit_init();

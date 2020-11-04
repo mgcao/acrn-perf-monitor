@@ -28,6 +28,14 @@
 
 //for memory bandwidth info read from hostbridge
 
+#define DEBUG 0
+
+#if DEBUG
+	#define dbg_info(...) printf(__VA_ARGS__)
+#else
+	#define dbg_info(...)
+#endif
+
 static int dev_mem_handle;
 static char* mem_mon_vaddr;
 
@@ -42,6 +50,8 @@ static uint64_t mem_bw_kbyte[5];
 bool dram_mon_init(void)
 {
 	dev_mem_handle = open("/dev/mem", O_RDONLY);
+
+	dbg_info("dram_mon_init: open /dev/mem: %d!\n", dev_mem_handle);
 
 	if (dev_mem_handle < 0) {
 		fprintf(stderr, "open /dev/mem failed, please check kernel config! err: %s\n", strerror(errno));
