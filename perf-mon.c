@@ -26,6 +26,8 @@
 #include <sys/mman.h>
 
 #include "pmc.h"
+#include "dram_counter.h"
+#include "acrn_vmexit.h"
 
 static inline uint64_t rdtsc(void)
 {
@@ -42,7 +44,7 @@ static inline uint64_t rdtsc(void)
 
 int main(int argc, const char *argv[])
 {
-	if (argc !=2 ) {
+	if (argc != 2 ) {
 		printf("input as: perf-mon count\n");
 		return -1;
 	}
@@ -56,25 +58,51 @@ int main(int argc, const char *argv[])
 //	pmc_init(0);
 //	pmc_init(1);
 
+	bool has_dram_info = dram_mon_init();
+	bool has_vmexit = acrn_vmexit_init();
+
 	for (int i = 0; i < count; i++) {
 
-	
+		if (has_dram_info) {
+			dram_mon_start();
+		}
+
+		if (has_vmexit) {
+			acrn_vmexit_begin();
+		}
+
 		pmc_start(0);
 		pmc_start(1);
 
 		tsc_start = rdtsc();
 
-		sleep(3);
+		usleep(DEFAULT_INTERVAL);
 
 		tsc_stop = rdtsc();
 
 		pmc_stop(0);
-		pmc_report();
-
 		pmc_stop(1);
-		pmc_report();
 
-		printf("TSC start:0x%lx, end:0x%lx, delta:%lu", tsc_start, tsc_stop, tsc_stop - tsc_start);
+		if (has_dram_info) {
+			dram_mon_stop();
+		}
+	
+		if (has_vmexit) {
+			acrn_vmexit_end();
+		}	
+	
+		pmc_report();
+	
+		if (has_dram_info) {
+			dram_mon_dump();
+		}
+
+		if (has_vmexit) {
+			acrn_vmexit_dump();
+		}
+
+		printf("TSC start:0x%lx, end:0x%lx, delta:%lu\n", tsc_start, tsc_stop, tsc_stop - tsc_start);
+	
 
 	}
 

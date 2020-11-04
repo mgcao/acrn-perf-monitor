@@ -16,6 +16,14 @@
 
 #include "msr.h"
 
+#define DEBUG 0
+
+#if DEBUG
+	#define dbg_info(...) printf(__VA_ARGS__)
+#else
+	#define dbg_info(...)
+#endif
+
 uint64_t rdmsr_on_cpu(uint32_t reg, int cpu)
 {
 	uint64_t data;
@@ -50,7 +58,7 @@ uint64_t rdmsr_on_cpu(uint32_t reg, int cpu)
 
 	close(fd);
 
-	printf("msr: 0x%x, val: 0x%lx", reg, data);
+	dbg_info("rdmsr: 0x%x, val: 0x%lx\n", reg, data);
 
 	return data;
 }
@@ -112,6 +120,8 @@ void wrmsr_on_cpu(uint32_t reg, int cpu, uint64_t regval)
 	}
 
 	close(fd);
+
+	dbg_info("wrmsr: 0x%x, val: 0x%lx\n", reg, regval);
 
 	return;
 }
