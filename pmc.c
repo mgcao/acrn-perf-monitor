@@ -263,7 +263,7 @@ bool pmc_init(int cpu)
 
 	dbg_info("pmc_init system ret=%d\n", ret);
 	if (ret != 0) {
-		fprintf(stderr, RDPMC_PATH "set failed, please check!\n");
+		fprintf(stderr, RDPMC_PATH " set failed, please check! need expose it from kernel!\n");
 		return false;
 	}
     //use cpuid to check its version: >=4
