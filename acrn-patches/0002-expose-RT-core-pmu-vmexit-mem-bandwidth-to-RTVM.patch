@@ -1,0 +1,270 @@
+From c7ab7936e00c49d0080a6404bf00346fff824094 Mon Sep 17 00:00:00 2001
+From: Minggui Cao <minggui.cao@intel.com>
+Date: Wed, 4 Nov 2020 18:43:47 +0800
+Subject: [PATCH 2/2] expose RT core pmu/vmexit/mem bandwidth to RTVM
+
+  1. expose vmexit data with a magic flag
+  2. expose memory bandwidth monitor regs by hostbridge
+  3. expose PMU related CPUID/MSR to RTVM
+
+note:
+  acrn-dm need update too for post-launched RTVM 1MB RAM
+  reserved.
+
+Signed-off-by: Minggui Cao <minggui.cao@intel.com>
+---
+ devicemodel/core/sw_load_common.c  |  9 ++++--
+ devicemodel/include/sw_load.h      |  4 +--
+ hypervisor/arch/x86/guest/vcpuid.c |  5 ++++
+ hypervisor/arch/x86/guest/virq.c   |  9 ++++++
+ hypervisor/arch/x86/guest/vm.c     |  7 +++++
+ hypervisor/arch/x86/guest/vmcs.c   |  7 ++++-
+ hypervisor/arch/x86/guest/vmexit.c |  1 +
+ hypervisor/arch/x86/guest/vmsr.c   | 45 ++++++++++++++++++++++++++++++
+ hypervisor/common/hv_main.c        | 25 +++++++++++++++++
+ 9 files changed, 106 insertions(+), 6 deletions(-)
+
+diff --git a/devicemodel/core/sw_load_common.c b/devicemodel/core/sw_load_common.c
+index 20b1c1e7..8a677f29 100644
+--- a/devicemodel/core/sw_load_common.c
++++ b/devicemodel/core/sw_load_common.c
+@@ -70,13 +70,16 @@ const struct e820_entry e820_default_entries[NUM_E820_ENTRIES] = {
+ 		.length   = 0xA0000,
+ 		.type     = E820_TYPE_RAM
+ 	},
+-
+-	{	/* 1MB to lowmem part1 */
++	{	/* 1MB to lowmem */
+ 		.baseaddr = 1 * MB,
++		.length   = 1 * MB,
++		.type     = E820_TYPE_RESERVED
++	},
++	{	/* 1MB to lowmem part1 */
++		.baseaddr = 2 * MB,
+ 		.length   = 0x0,
+ 		.type     = E820_TYPE_RAM
+ 	},
+-
+ 	{	/* TGL GPU DSM & OpRegion area */
+ 		.baseaddr = 0x3B800000,
+ 		.length   = 0x4004000,
+diff --git a/devicemodel/include/sw_load.h b/devicemodel/include/sw_load.h
+index 46fb8788..57b35d6a 100644
+--- a/devicemodel/include/sw_load.h
++++ b/devicemodel/include/sw_load.h
+@@ -40,8 +40,8 @@
+ #define E820_TYPE_UNUSABLE      5U   /* EFI 8 */
+ 
+ #define NUM_E820_ENTRIES        9
+-#define LOWRAM_E820_ENTRY       1
+-#define HIGHRAM_E820_ENTRY      6
++#define LOWRAM_E820_ENTRY       2
++#define HIGHRAM_E820_ENTRY      7
+ 
+ /* Defines a single entry in an E820 memory map. */
+ struct e820_entry {
+diff --git a/hypervisor/arch/x86/guest/vcpuid.c b/hypervisor/arch/x86/guest/vcpuid.c
+index d6bfa79e..1f4dfb0e 100644
+--- a/hypervisor/arch/x86/guest/vcpuid.c
++++ b/hypervisor/arch/x86/guest/vcpuid.c
+@@ -367,6 +367,11 @@ int32_t set_vcpuid_entries(struct acrn_vm *vm)
+ 			/* These features are disabled */
+ 			/* PMU is not supported */
+ 			case 0x0aU:
++				if (is_rt_vm(vm)) {
++					init_vcpuid_entry(i, 0U, 0U, &entry);
++					result = set_vcpuid_entry(vm, &entry);
++				}
++				break;
+ 			/* Intel RDT */
+ 			case 0x0fU:
+ 			case 0x10U:
+diff --git a/hypervisor/arch/x86/guest/virq.c b/hypervisor/arch/x86/guest/virq.c
+index 5390617f..f9007412 100644
+--- a/hypervisor/arch/x86/guest/virq.c
++++ b/hypervisor/arch/x86/guest/virq.c
+@@ -515,6 +515,15 @@ int32_t exception_vmexit_handler(struct acrn_vcpu *vcpu)
+ 		}
+ 	}
+ 
++	if (is_rt_vm(vcpu->vm) && (vcpu->vcpu_id == 1U)) {
++		volatile uint64_t *vmexit_vector;
++
++		stac();
++		vmexit_vector = (uint64_t *)gpa2hva(vcpu->vm, 0x100010UL);
++		*vmexit_vector = exception_vector;
++		clac();
++	}
++
+ 	/* Handle all other exceptions */
+ 	vcpu_retain_rip(vcpu);
+ 
+diff --git a/hypervisor/arch/x86/guest/vm.c b/hypervisor/arch/x86/guest/vm.c
+index 3d725abb..f3e22e6a 100644
+--- a/hypervisor/arch/x86/guest/vm.c
++++ b/hypervisor/arch/x86/guest/vm.c
+@@ -554,6 +554,13 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
+ 		(void)memset(vm->arch_vm.nworld_eptp, 0U, PAGE_SIZE);
+ 	}
+ 
++	if (is_rt_vm(vm)) {
++		/* expose host bridge MMIO for memory bandwidth monitoring */
++		ept_del_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, 0xFED15000, 4096);
++		ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, 0xFED15000, 0xFED15000,
++			4096, EPT_RWX | EPT_UNCACHED);
++	}
++
+ 	return status;
+ }
+ 
+diff --git a/hypervisor/arch/x86/guest/vmcs.c b/hypervisor/arch/x86/guest/vmcs.c
+index b57ed4a2..cb9deb3f 100644
+--- a/hypervisor/arch/x86/guest/vmcs.c
++++ b/hypervisor/arch/x86/guest/vmcs.c
+@@ -282,7 +282,12 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
+ 	/*
+ 	 * Enable VM_EXIT for rdpmc execution.
+ 	 */
+-	value32 |= VMX_PROCBASED_CTLS_RDPMC;
++	if (!is_rt_vm(vcpu->vm)) {
++		value32 |= VMX_PROCBASED_CTLS_RDPMC;
++		pr_acrnlog("RDPMC disabled\n");
++	} else {
++		pr_acrnlog("RDPMC enabled\n");
++	}
+ 
+ 	exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS, value32);
+ 	pr_dbg("VMX_PROC_VM_EXEC_CONTROLS: 0x%x ", value32);
+diff --git a/hypervisor/arch/x86/guest/vmexit.c b/hypervisor/arch/x86/guest/vmexit.c
+index 9917c2ec..9d9d3ec0 100644
+--- a/hypervisor/arch/x86/guest/vmexit.c
++++ b/hypervisor/arch/x86/guest/vmexit.c
+@@ -386,6 +386,7 @@ static int32_t wbinvd_vmexit_handler(struct acrn_vcpu *vcpu)
+ 	/* GUEST_FLAG_RT has not set in post-launched RTVM before it has been created */
+ 	if ((!is_psram_initialized) && (has_rt_vm() == false)) {
+ 		cache_flush_invalidate_all();
++		pr_err("%s: wbinvd !!!!!!!!", __func__);
+ 	} else {
+ 		if (is_rt_vm(vcpu->vm)) {
+ 			walk_ept_table(vcpu->vm, ept_flush_leaf_page);
+diff --git a/hypervisor/arch/x86/guest/vmsr.c b/hypervisor/arch/x86/guest/vmsr.c
+index cf5d6dbc..93d503f2 100644
+--- a/hypervisor/arch/x86/guest/vmsr.c
++++ b/hypervisor/arch/x86/guest/vmsr.c
+@@ -363,6 +363,42 @@ void init_msr_emulation(struct acrn_vcpu *vcpu)
+ 	enable_msr_interception(msr_bitmap, MSR_IA32_TIME_STAMP_COUNTER, INTERCEPT_WRITE);
+ 	enable_msr_interception(msr_bitmap, MSR_IA32_XSS, INTERCEPT_WRITE);
+ 
++	if (is_rt_vm(vcpu->vm)) {
++		/* Passthru PMU related MSRs to guest */
++		enable_msr_interception(msr_bitmap, MSR_IA32_FIXED_CTR_CTL, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PERF_GLOBAL_CTRL, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PERF_GLOBAL_STATUS, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PERF_GLOBAL_OVF_CTRL, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PERF_GLOBAL_STATUS_SET, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PERF_GLOBAL_INUSE, INTERCEPT_DISABLE);
++
++		enable_msr_interception(msr_bitmap, MSR_IA32_FIXED_CTR0, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_FIXED_CTR1, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_FIXED_CTR2, INTERCEPT_DISABLE);
++
++		enable_msr_interception(msr_bitmap, MSR_IA32_PMC0, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PMC1, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PMC2, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PMC3, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PMC4, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PMC5, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PMC6, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PMC7, INTERCEPT_DISABLE);
++
++		enable_msr_interception(msr_bitmap, MSR_IA32_A_PMC0, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_A_PMC1, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_A_PMC2, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_A_PMC3, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_A_PMC4, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_A_PMC5, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_A_PMC6, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_A_PMC7, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PERFEVTSEL0, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PERFEVTSEL1, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PERFEVTSEL2, INTERCEPT_DISABLE);
++		enable_msr_interception(msr_bitmap, MSR_IA32_PERFEVTSEL3, INTERCEPT_DISABLE);
++	}
++
+ 	/* Setup MSR bitmap - Intel SDM Vol3 24.6.9 */
+ 	value64 = hva2hpa(vcpu->arch.msr_bitmap);
+ 	exec_vmwrite64(VMX_MSR_BITMAP_FULL, value64);
+@@ -414,6 +450,15 @@ int32_t rdmsr_vmexit_handler(struct acrn_vcpu *vcpu)
+ 	/* Read the msr value */
+ 	msr = (uint32_t)vcpu_get_gpreg(vcpu, CPU_REG_RCX);
+ 
++	if (is_rt_vm(vcpu->vm) && (vcpu->vcpu_id == 1U)) {
++		volatile uint64_t *vmexit_msr;
++
++		stac();
++		vmexit_msr = (uint64_t *)gpa2hva(vcpu->vm, 0x100010UL);
++		*vmexit_msr = msr;
++		clac();
++	}
++
+ 	/* Do the required processing for each msr case */
+ 	switch (msr) {
+ #ifdef CONFIG_HYPERV_ENABLED
+diff --git a/hypervisor/common/hv_main.c b/hypervisor/common/hv_main.c
+index 6895bfad..173825e3 100644
+--- a/hypervisor/common/hv_main.c
++++ b/hypervisor/common/hv_main.c
+@@ -15,11 +15,21 @@
+ #include <trace.h>
+ #include <logmsg.h>
+ 
++#define ACRN_MAGIC_FLAG  ((uint64_t)0x4143524E45584954UL) //ACRNEXIT
++
+ void vcpu_thread(struct thread_object *obj)
+ {
+ 	struct acrn_vcpu *vcpu = container_of(obj, struct acrn_vcpu, thread_obj);
+ 	uint32_t basic_exit_reason = 0U;
+ 	int32_t ret = 0;
++	volatile uint64_t *vmexit_rt = NULL;
++
++	if (is_rt_vm(vcpu->vm)) {
++		vmexit_rt = (uint64_t *)gpa2hva(vcpu->vm, 0x100000);
++		stac();
++		vmexit_rt[5] = ACRN_MAGIC_FLAG;
++		clac();
++	}
+ 
+ 	do {
+ 		if (!is_lapic_pt_enabled(vcpu)) {
+@@ -44,6 +54,12 @@ void vcpu_thread(struct thread_object *obj)
+ 
+ 		reset_event(&vcpu->events[VCPU_EVENT_VIRTUAL_INTERRUPT]);
+ 		profiling_vmenter_handler(vcpu);
++
++		if (is_rt_vm(vcpu->vm) && (vcpu->vcpu_id == 1U)) {
++			stac();
++			vmexit_rt[4] = rdtsc();
++			clac();
++		}
+ 		TRACE_2L(TRACE_VM_ENTER, 0UL, 0UL);
+ 		sample_vmexit_end(basic_exit_reason, vcpu);
+ 
+@@ -62,6 +78,15 @@ void vcpu_thread(struct thread_object *obj)
+ 
+ 		vcpu->arch.nrexits++;
+ 
++		if (is_rt_vm(vcpu->vm) && (vcpu->vcpu_id == 1U)) {
++			stac();
++			vmexit_rt[3] = rdtsc();
++			vmexit_rt[0] = vcpu->arch.nrexits;
++			vmexit_rt[1] = basic_exit_reason;
++			vmexit_rt[2] = 0;
++			clac();
++		}
++
+ 		profiling_pre_vmexit_handler(vcpu);
+ 
+ 		if (!is_lapic_pt_enabled(vcpu)) {
+-- 
+2.17.1
+
